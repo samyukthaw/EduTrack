@@ -125,9 +125,17 @@ export default function Admin() {
       />
       <br />
       <input
-        type="date"
-        onChange={(e) => setForm({ ...form, due_date: e.target.value })}
-      />
+  type="date"
+  value={form.due_date}
+  onChange={(e) => setForm({ ...form, due_date: e.target.value })}
+  onClick={(e) => e.target.showPicker()}
+  style={{
+    padding: "10px",
+    fontSize: "16px",
+    cursor: "pointer",
+    colorScheme: "dark"
+  }}
+/>
       <br />
       <input
         placeholder="OneDrive Link"
@@ -148,7 +156,7 @@ export default function Admin() {
             {editingId === a.id ? (
               <div>
                 <input
-                  value={editForm.title}
+                  value={editForm.due_date}
                   onChange={(e) => setEditForm({ ...editForm, title: e.target.value })}
                 />
                 <br />
@@ -159,8 +167,13 @@ export default function Admin() {
                 <br />
                 <input
                   type="date"
-                  value={editForm.due_date}
-                  onChange={(e) => setEditForm({ ...editForm, due_date: e.target.value })}
+                  value={form.due_date}
+                  onChange={(e) => setForm({ ...form, due_date: e.target.value })}
+                  style={{
+                    padding: "10px",
+                    fontSize: "16px",
+                    cursor: "pointer"
+                  }}
                 />
                 <br />
                 <input
