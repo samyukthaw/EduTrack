@@ -1,293 +1,363 @@
+
 require("dotenv").config();
-
-require("dotenv").config({ path: "./.env" });
-console.log("ENV TEST:", process.env.DB_PASSWORD);
-
 
 const express = require("express");
 const cors = require("cors");
-const { Pool } = require("pg");
-const bcrypt = require("bcrypt"); //for password security
-const jwt = require("jsonwebtoken");  //for login
+const mongoose = require("mongoose");
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+
+const { User, Course, Assignment, Group, Submission } = require("./models");
 
 const app = express();
+app.use(cors());
+app.use(express.json());
 
-//middleware
-app.use(cors());                // allow frontend to call backend
-app.use(express.json());        // read JSON data
 
-//connect database or 
-const pool = new Pool({
-    user: process.env.DB_USER,
-    host: process.env.DB_HOST,
-    database: process.env.DB_NAME,
-    password: process.env.DB_PASSWORD,
-    port: process.env.DB_PORT,
-});
+console.log("MONGO URI:", process.env.MONGO_URI);
+//connect mongodb
+mongoose.connect(process.env.MONGO_URI)
+  .then(() => console.log("MongoDB connected"))
+  .catch((err) => console.error("MongoDB error:", err));
 
-// =======================
-// 🔐 JWT SECRET
-// =======================
-const SECRET = "secret123";
+const SECRET = process.env.JWT_SECRET || "secret123";
 
-// =======================
-// 🔐 AUTH MIDDLEWARE
-// =======================
+//auth middleware 
 const auth = (req, res, next) => {
   try {
     const token = req.headers.authorization;
-
-    if (!token) return res.status(401).send("No token");
-
-    const decoded = jwt.verify(token, SECRET);
-
-    req.user = decoded; //contains userId + role
-
+    if (!token) return res.status(401).json({ error: "No token" });
+    req.user = jwt.verify(token, SECRET);
     next();
   } catch {
-    res.status(401).send("Invalid token");
+    res.status(401).json({ error: "Invalid token" });
   }
+};
+
+const professorOnly = (req, res, next) => {
+  if (req.user.role !== "professor") return res.status(403).json({ error: "Professors only" });
+  next();
 };
 
 //register
 app.post("/register", async (req, res) => {
-  const { name, email, password, role, student_id } = req.body;
+  try {
+    const { name, email, password, role, student_id } = req.body;
+    const existing = await User.findOne({ email });
+    if (existing) return res.status(400).json({ error: "Email already registered" });
 
-  const hashed = await bcrypt.hash(password, 10);
-
-  await pool.query(
-    "INSERT INTO users (name, email, password, role, student_id) VALUES ($1,$2,$3,$4,$5)",
-    [name, email, hashed, role, student_id]
-  );
-
-  res.send("User registered");
+    const hashed = await bcrypt.hash(password, 10);
+    const user = await User.create({ name, email, password: hashed, role, student_id });
+    res.json({ message: "User registered", userId: user._id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 //login
 app.post("/login", async (req, res) => {
-  const { email, password } = req.body;
+  try {
+    const { email, password } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) return res.status(401).json({ error: "User not found" });
 
-  const user = await pool.query(
-    "SELECT * FROM users WHERE email=$1",
-    [email]
-  );
+    const valid = await bcrypt.compare(password, user.password);
+    if (!valid) return res.status(401).json({ error: "Wrong password" });
 
-  if (user.rows.length === 0) {
-    return res.status(401).json({ error: "User not found" });
+    const token = jwt.sign({ userId: user._id, role: user.role, name: user.name }, SECRET);
+    res.json({ token, role: user.role, name: user.name });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  const valid = await bcrypt.compare(password, user.rows[0].password);
-
-  if (!valid) {
-    return res.status(401).json({ error: "Wrong password" });
-  }
-
-  const token = jwt.sign(
-    {
-      userId: user.rows[0].id,
-      role: user.rows[0].role,
-    },
-    SECRET
-  );
-
-  res.json({ token });
-});
-//CREATE GROUP , here auth is middleware that verifies and fetches token info 
-app.post("/groups", auth, async (req, res) => {
-  const { name } = req.body;
-
-  //create group
-  const result = await pool.query(
-    "INSERT INTO groups (name, created_by) VALUES ($1,$2) RETURNING id",
-    [name, req.user.userId]
-  );
-
-  const groupId = result.rows[0].id;
-
-  //add creator as member
-  await pool.query(
-    "INSERT INTO group_members (group_id, user_id) VALUES ($1,$2)",
-    [groupId, req.user.userId]
-  );
-
-  res.send("Group created");
 });
 
-
-//ADD MEMBER WITH STUDENT ID
-app.post("/groups/:id/add-member", auth, async (req, res) => {
-  const { student_id } = req.body;
-  const groupId = req.params.id; //requests group id of the group we are in
-
-  //find user
-  const user = await pool.query(
-    "SELECT id FROM users WHERE student_id=$1",
-    [student_id]
-  );
-
-  if (user.rows.length === 0) {
-    return res.send("User not found");
+//courses
+//create course(professor only)
+app.post("/courses", auth, professorOnly, async (req, res) => {
+  try {
+    const { name, code } = req.body;
+    const course = await Course.create({ name, code, professor: req.user.userId });
+    res.json(course);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  //add to group
-  await pool.query(
-    "INSERT INTO group_members (group_id, user_id) VALUES ($1,$2)",
-    [groupId, user.rows[0].id]
-  );
-
-  res.send("Member added");
 });
 
-//CREATE ASSIGNMENT (ONLY BY ADMIN)
-app.post("/assignments", auth, async (req, res) => {
-  const { title, description, due_date, onedrive_link } = req.body;
-    //if student tries to create
-  if (req.user.role !== "admin") {
-    return res.send("Only admin can create");
+//get courses for logged-in user
+app.get("/courses", auth, async (req, res) => {
+  try {
+    let courses;
+    if (req.user.role === "professor") {
+      courses = await Course.find({ professor: req.user.userId }).populate("assignments");
+    } else {
+      courses = await Course.find({ students: req.user.userId }).populate("assignments");
+    }
+    res.json(courses);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-    //else if admin tries to create
-  await pool.query(
-    "INSERT INTO assignments (title, description, due_date, onedrive_link) VALUES ($1,$2,$3,$4)",
-    [title, description, due_date, onedrive_link]
-  );
-
-  res.send("Assignment created");
 });
 
+//enroll student in course
+app.post("/courses/:id/enroll", auth, async (req, res) => {
+  try {
+    const course = await Course.findById(req.params.id);
+    if (!course) return res.status(404).json({ error: "Course not found" });
+    if (!course.students.includes(req.user.userId)) {
+      course.students.push(req.user.userId);
+      await course.save();
+      await User.findByIdAndUpdate(req.user.userId, { $addToSet: { enrolledCourses: course._id } });
+    }
+    res.json({ message: "Enrolled successfully" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
+//get all courses (for browsing/enrolling)
+app.get("/courses/all", auth, async (req, res) => {
+  try {
+    const courses = await Course.find().populate("professor", "name");
+    res.json(courses);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-//GET ASSIGNMENTS
+//assignments
+
+//create assignment
+app.post("/assignments", auth, professorOnly, async (req, res) => {
+  try {
+    const { title, description, due_date, onedrive_link, courseId, submissionType } = req.body;
+    const assignment = await Assignment.create({
+      title, description, due_date, onedrive_link,
+      course: courseId,
+      submissionType: submissionType || "individual",
+      createdBy: req.user.userId,
+    });
+    //attach to course
+    await Course.findByIdAndUpdate(courseId, { $push: { assignments: assignment._id } });
+    res.json(assignment);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+//get assignments for a course
+app.get("/assignments/course/:courseId", auth, async (req, res) => {
+  try {
+    const assignments = await Assignment.find({ course: req.params.courseId });
+    res.json(assignments);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+//get all assignments (for student dashboard)
 app.get("/assignments", auth, async (req, res) => {
-  const data = await pool.query("SELECT * FROM assignments");
-  res.json(data.rows);
-});
-
-
-//SUBMIT ASSIGNMENT
-app.post("/submit/:id", auth, async (req, res) => {
-  const assignmentId = req.params.id;
-
-  await pool.query(
-    "INSERT INTO submissions (user_id, assignment_id, confirmed) VALUES ($1,$2,true)",
-    [req.user.userId, assignmentId]
-  );
-
-  res.send("Submission confirmed");
-});
-
-
-//VIEW SUBMISSIONS(ONLY BY STUDENT)
-app.get("/submissions", auth, async (req, res) => {
-  if (req.user.role !== "admin") {
-    return res.send("Only admin is allowed to view submissions");
+  try {
+    const assignments = await Assignment.find().populate("course", "name code");
+    res.json(assignments);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  const data = await pool.query(`
-    SELECT users.name, users.student_id, submissions.assignment_id, submissions.confirmed
-    FROM submissions
-    JOIN users ON submissions.user_id = users.id
-  `);
-
-  res.json(data.rows);
 });
 
-// EDIT ASSIGNMENT
-app.put("/assignments/:id", auth, async (req, res) => {
-  if (req.user.role !== "admin") return res.status(403).send("Only admin can edit");
-  const { title, description, due_date, onedrive_link } = req.body;
-  await pool.query(
-    "UPDATE assignments SET title=$1, description=$2, due_date=$3, onedrive_link=$4 WHERE id=$5",
-    [title, description, due_date, onedrive_link, req.params.id]
-  );
-  res.send("Assignment updated");
-});
-
-// DELETE ASSIGNMENT
-app.delete("/assignments/:id", auth, async (req, res) => {
-  if (req.user.role !== "admin") return res.status(403).send("Only admin can delete");
-  await pool.query("DELETE FROM submissions WHERE assignment_id=$1", [req.params.id]);
-  await pool.query("DELETE FROM assignments WHERE id=$1", [req.params.id]);
-  res.send("Assignment deleted");
-});
-
-// GET MY GROUPS WITH MEMBERS
-app.get("/groups", auth, async (req, res) => {
-  // get groups the user belongs to
-  const groupsResult = await pool.query(`
-    SELECT groups.id, groups.name
-    FROM groups
-    JOIN group_members ON groups.id = group_members.group_id
-    WHERE group_members.user_id = $1
-  `, [req.user.userId]);
-
-  const groups = groupsResult.rows;
-
-  // get members for each group
-  for (let group of groups) {
-    const membersResult = await pool.query(`
-      SELECT users.id AS user_id, users.name, users.student_id
-      FROM group_members
-      JOIN users ON group_members.user_id = users.id
-      WHERE group_members.group_id = $1
-    `, [group.id]);
-    group.members = membersResult.rows;
+//edit assignment
+app.put("/assignments/:id", auth, professorOnly, async (req, res) => {
+  try {
+    const { title, description, due_date, onedrive_link, submissionType } = req.body;
+    const updated = await Assignment.findByIdAndUpdate(
+      req.params.id,
+      { title, description, due_date, onedrive_link, submissionType },
+      { new: true }
+    );
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  res.json(groups);
 });
 
-// REMOVE MEMBER FROM GROUP
+//delete assignment
+app.delete("/assignments/:id", auth, professorOnly, async (req, res) => {
+  try {
+    await Assignment.findByIdAndDelete(req.params.id);
+    await Submission.deleteMany({ assignment: req.params.id });
+    res.json({ message: "Assignment deleted" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+//submit assignment - individual
+app.post("/submit/:assignmentId", auth, async (req, res) => {
+  try {
+    const existing = await Submission.findOne({
+      user: req.user.userId,
+      assignment: req.params.assignmentId,
+    });
+    if (existing) return res.status(400).json({ error: "Already submitted" });
+
+    const submission = await Submission.create({
+      user: req.user.userId,
+      assignment: req.params.assignmentId,
+      confirmed: true,
+    });
+    res.json({ message: "Submitted!", submission });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+//only group leader can acknowledge — marks all group members
+app.post("/acknowledge/:assignmentId", auth, async (req, res) => {
+  try {
+    const { groupId } = req.body;
+    const group = await Group.findById(groupId);
+
+    if (!group) return res.status(404).json({ error: "Group not found" });
+
+    //check if requester is the leader
+    if (group.leader.toString() !== req.user.userId.toString()) {
+      return res.status(403).json({ error: "Only the group leader can acknowledge" });
+    }
+
+    //mark all group members submissions as acknowledged
+    await Submission.updateMany(
+      {
+        assignment: req.params.assignmentId,
+        user: { $in: group.members },
+      },
+      {
+        acknowledged: true,
+        acknowledgedBy: req.user.userId,
+      }
+    );
+
+    res.json({ message: "Acknowledged for all group members" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+//get my submissions
+app.get("/my-submissions", auth, async (req, res) => {
+  try {
+    const subs = await Submission.find({ user: req.user.userId }).populate("assignment");
+    res.json(subs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+//get submissions for an assignment (professor)
+app.get("/submissions/:assignmentId", auth, professorOnly, async (req, res) => {
+  try {
+    const subs = await Submission.find({ assignment: req.params.assignmentId })
+      .populate("user", "name student_id email");
+    res.json(subs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+//create group
+app.post("/groups", auth, async (req, res) => {
+  try {
+    const { name, courseId } = req.body;
+    const group = await Group.create({
+      name,
+      course: courseId,
+      leader: req.user.userId,
+      members: [req.user.userId],
+      created_by: req.user.userId,
+    });
+    res.json(group);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+//add member by student_id
+app.post("/groups/:id/add-member", auth, async (req, res) => {
+  try {
+    const { student_id } = req.body;
+    const user = await User.findOne({ student_id });
+    if (!user) return res.status(404).json({ error: "Student not found" });
+
+    const group = await Group.findById(req.params.id);
+    if (!group) return res.status(404).json({ error: "Group not found" });
+    if (group.leader.toString() !== req.user.userId.toString()) {
+      return res.status(403).json({ error: "Only leader can add members" });
+    }
+
+    if (!group.members.includes(user._id)) {
+      group.members.push(user._id);
+      await group.save();
+    }
+    res.json({ message: "Member added" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+//remove member
 app.delete("/groups/:groupId/remove-member/:userId", auth, async (req, res) => {
   try {
-    const groupId = parseInt(req.params.groupId);
-    const userId = parseInt(req.params.userId);
-    await pool.query(
-      "DELETE FROM group_members WHERE group_id=$1 AND user_id=$2",
-      [groupId, userId]
-    );
-    res.send("Member removed");
+    await Group.findByIdAndUpdate(req.params.groupId, {
+      $pull: { members: req.params.userId }
+    });
+    res.json({ message: "Member removed" });
   } catch (err) {
-    res.status(500).send(err.message);
+    res.status(500).json({ error: err.message });
   }
 });
 
-// GET SUBMISSION STATS
+//get my groups
+app.get("/groups", auth, async (req, res) => {
+  try {
+    const groups = await Group.find({ members: req.user.userId })
+      .populate("members", "name student_id email")
+      .populate("leader", "name");
+    res.json(groups);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+//stats prof dashboard
 app.get("/stats", auth, async (req, res) => {
-  const totalStudents = await pool.query(
-    "SELECT COUNT(*) FROM users WHERE role='student'"
-  );
+  try {
+    const totalStudents = await User.countDocuments({ role: "student" });
+    const totalAssignments = await Assignment.countDocuments();
 
-  const totalAssignments = await pool.query(
-    "SELECT COUNT(*) FROM assignments"
-  );
+    const assignments = await Assignment.find();
+    const submissionsPerAssignment = await Promise.all(
+      assignments.map(async (a) => {
+        const count = await Submission.countDocuments({ assignment: a._id, confirmed: true });
+        return { id: a._id, title: a.title, submission_count: count, due_date: a.due_date };
+      })
+    );
 
-  const submissionsPerAssignment = await pool.query(`
-    SELECT assignments.id, assignments.title, COUNT(submissions.id) as submission_count
-    FROM assignments
-    LEFT JOIN submissions ON assignments.id = submissions.assignment_id
-    GROUP BY assignments.id, assignments.title
-  `);
+    const userSubmissions = await Submission.find({ user: req.user.userId });
 
-  const userSubmissions = await pool.query(
-    "SELECT assignment_id FROM submissions WHERE user_id=$1",
-    [req.user.userId]
-  );
-
-  res.json({
-    totalStudents: parseInt(totalStudents.rows[0].count),
-    totalAssignments: parseInt(totalAssignments.rows[0].count),
-    submissionsPerAssignment: submissionsPerAssignment.rows,
-    userSubmissions: userSubmissions.rows.map(r => r.assignment_id)
-  });
-});
-//ROOT
-app.get("/", (req, res) => {
-  res.send("Backend running");
+    res.json({
+      totalStudents,
+      totalAssignments,
+      submissionsPerAssignment,
+      userSubmissions: userSubmissions.map(s => s.assignment),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-//START SERVER
-app.listen(5000, () => {
-  console.log("Server running on port 5000");
+//root
+app.get("/", (req, res) => res.send("EduTrack backend running"));
+
+const PORT = 5000;
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log("Server running on port " + PORT);
 });
-
-

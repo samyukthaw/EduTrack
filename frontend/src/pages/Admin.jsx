@@ -125,17 +125,9 @@ export default function Admin() {
       />
       <br />
       <input
-  type="date"
-  value={form.due_date}
-  onChange={(e) => setForm({ ...form, due_date: e.target.value })}
-  onClick={(e) => e.target.showPicker()}
-  style={{
-    padding: "10px",
-    fontSize: "16px",
-    cursor: "pointer",
-    colorScheme: "dark"
-  }}
-/>
+        type="date"
+        onChange={(e) => setForm({ ...form, due_date: e.target.value })}
+      />
       <br />
       <input
         placeholder="OneDrive Link"
