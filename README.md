@@ -92,9 +92,9 @@ cd frontend
 npm install  
 npm run dev  
 
-
-## Demo
-
+## Live Demo
+Frontend: https://edu-track-lilac.vercel.app/
+## Demo Video
 https://youtu.be/HPClovKQsqw
 
 ---
